@@ -9,7 +9,7 @@
 * **Track:** AI for Climate Change / Public Health & Community Resilience (Hackathon 2026 @ PCCOE Campus)
 * **Status:** Complete Full-Stack Working Prototype (FastAPI + React/Vite + OpenStreetMap + Open-Meteo)
 * **Zero Billing / No-Cost APIs:** 100% powered by free public telemetry (Open-Meteo, OpenStreetMap Overpass API, WHO RSS, ReliefWeb API).
-* **Presentation Deck:** Included in repository [`ClimateGuard_AI_Hackathon_Presentation.pdf`](./ClimateGuard_AI_Hackathon_Presentation.pdf).
+* **Presentation Deck:** Included in repository [`ClimateGuard_AI_Presentation.pdf`](./ClimateGuard_AI_Presentation.pdf).
 
 ---
 
