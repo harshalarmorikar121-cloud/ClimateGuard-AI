@@ -129,3 +129,13 @@ class CustomCityEvaluationRequest(BaseModel):
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
     disease: Optional[str] = "Dengue"
+
+
+class AIDiseasePredictionRequest(BaseModel):
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    location_name: Optional[str] = "Location"
+    temperature: Optional[float] = None
+    humidity: Optional[float] = None
+    rainfall_7d: Optional[float] = None
+    wind_speed: Optional[float] = None

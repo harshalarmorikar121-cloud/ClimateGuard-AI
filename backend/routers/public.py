@@ -5,9 +5,10 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from datetime import datetime
 from database import get_db
-from schemas import CustomCityEvaluationRequest
+from schemas import CustomCityEvaluationRequest, AIDiseasePredictionRequest
 from services.climate import fetch_live_weather
 from services.forecasting import calculate_vector_climate_suitability, generate_forecast_trajectory
+from services.ai_disease_model import ai_engine
 
 router = APIRouter(prefix="/api/public", tags=["Public Surveillance"])
 
@@ -85,7 +86,6 @@ async def get_all_cities_risk(db: Session = Depends(get_db)):
     if _cities_cache and (now - _cities_cache_timestamp) < CACHE_TTL:
         return _cities_cache
 
-    # Concurrent fetch across all sentinel cities
     tasks = [_process_city(city) for city in MONITORED_CITIES]
     results = await asyncio.gather(*tasks, return_exceptions=False)
     
@@ -130,6 +130,46 @@ async def evaluate_custom_location(
         "forecast_trajectory": trajectory,
         "evaluated_at": datetime.now().isoformat()
     }
+
+@router.post("/ai-disease-prediction")
+async def predict_disease_ai(req: AIDiseasePredictionRequest):
+    """
+    Dedicated AI Machine Learning Model:
+    Consumes Open-Meteo live satellite weather for any coordinates (or custom inputs)
+    and predicts Dengue and Malaria outbreak probabilities, incubation days (EIP),
+    and targeted alerts for Seniors 55+ and Infants 0-4.
+    """
+    temp = req.temperature
+    humidity = req.humidity
+    rain_7d = req.rainfall_7d
+    wind = req.wind_speed
+    loc_name = req.location_name or "Custom Location"
+
+    # If coordinates provided and weather params missing, fetch live from Open-Meteo
+    if (req.latitude is not None and req.longitude is not None) and (temp is None or humidity is None):
+        weather = await fetch_live_weather(req.latitude, req.longitude)
+        if weather:
+            temp = weather.get("temperature", 28.0) if temp is None else temp
+            humidity = weather.get("humidity", 70.0) if humidity is None else humidity
+            rain_7d = weather.get("recent_rain_7d", 15.0) if rain_7d is None else rain_7d
+            wind = weather.get("wind_speed", 8.0) if wind is None else wind
+            if not req.location_name or req.location_name == "Location":
+                loc_name = f"Coordinates ({req.latitude:.4f}, {req.longitude:.4f})"
+
+    temp = 28.0 if temp is None else temp
+    humidity = 70.0 if humidity is None else humidity
+    rain_7d = 15.0 if rain_7d is None else rain_7d
+    wind = 8.0 if wind is None else wind
+
+    prediction = ai_engine.predict(
+        temperature=float(temp),
+        humidity=float(humidity),
+        rainfall_7d=float(rain_7d),
+        wind_speed=float(wind),
+        location_name=loc_name
+    )
+
+    return prediction
 
 @router.get("/forecast-trajectory/{city_name}")
 async def get_city_forecast_trajectory(city_name: str):
