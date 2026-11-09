@@ -1,400 +1,539 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import './index.css';
-import { MapContainer, TileLayer, CircleMarker, Tooltip } from 'react-leaflet';
-import 'leaflet/dist/leaflet.css';
+import { api } from './services/api';
+import { ToastProvider, useToast } from './context/ToastContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import LiveRiskMap from './components/LiveRiskMap';
+import RiskForecastChart from './components/RiskForecastChart';
+import ShapWaterfall from './components/ShapWaterfall';
+import CustomLocationSearch from './components/CustomLocationSearch';
+import ReportSymptomModal from './components/ReportSymptomModal';
+import AdminPortal from './components/AdminPortal';
 
-// ── Live weather from Open-Meteo (free, no API key) ─────────────────────────
-const CITIES = [
-  { name: 'Delhi',     country: 'India',       lat: 28.61, lng: 77.21,  disease: 'Dengue',  risk: 0.92 },
-  { name: 'Mumbai',    country: 'India',       lat: 19.08, lng: 72.88,  disease: 'Dengue',  risk: 0.76 },
-  { name: 'Manila',    country: 'Philippines', lat: 14.60, lng: 120.98, disease: 'Dengue',  risk: 0.88 },
-  { name: 'Dhaka',     country: 'Bangladesh',  lat: 23.81, lng: 90.41,  disease: 'Dengue',  risk: 0.85 },
-  { name: 'Lagos',     country: 'Nigeria',     lat: 6.52,  lng: 3.38,   disease: 'Malaria', risk: 0.95 },
-  { name: 'São Paulo', country: 'Brazil',      lat: -23.55, lng: -46.63, disease: 'Dengue', risk: 0.79 },
-];
+function MainApp() {
+  const { addToast } = useToast();
+  const { isAuthenticated } = useAuth();
 
-async function getWeather(city) {
-  try {
-    const r = await fetch(
-      `https://api.open-meteo.com/v1/forecast?latitude=${city.lat}&longitude=${city.lng}` +
-      `&current=temperature_2m,relative_humidity_2m,precipitation&timezone=auto&forecast_days=1`,
-      { signal: AbortSignal.timeout(8000) }
-    );
-    const d = await r.json();
-    return {
-      temp: d.current?.temperature_2m,
-      humidity: d.current?.relative_humidity_2m,
-      rain: d.current?.precipitation,
-    };
-  } catch { return null; }
-}
+  // State
+  const [cities, setCities] = useState([]);
+  const [selectedCity, setSelectedCity] = useState(null);
+  const [forecastTrajectory, setForecastTrajectory] = useState([]);
+  const [whoAlerts, setWhoAlerts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [time, setTime] = useState(new Date());
 
-// ── WHO alerts via allorigins CORS proxy ─────────────────────────────────────
-const WHO_ALERTS = [
-  { title: 'Dengue – Global Situation Update', region: 'Southeast Asia', date: 'Aug 2026', severity: 'high',    link: 'https://www.who.int/emergencies/disease-outbreak-news' },
-  { title: 'Malaria Seasonal Surge – West Africa',   region: 'Africa',        date: 'Aug 2026', severity: 'high',    link: 'https://www.who.int/news-room/fact-sheets/detail/malaria' },
-  { title: 'Dengue Outbreak – Philippines',           region: 'Western Pacific',date: 'Jul 2026', severity: 'critical',link: 'https://www.who.int/westernpacific/emergencies/dengue-in-the-philippines' },
-  { title: 'Climate-Driven Vector Expansion',         region: 'Global',        date: 'Jul 2026', severity: 'medium',  link: 'https://www.who.int/news/item/03-06-2024-climate-change-is-already-impacting-health' },
-];
+  // Modals
+  const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+  const [isAdminPortalOpen, setIsAdminPortalOpen] = useState(false);
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-function riskColor(r) {
-  if (r >= 0.9) return '#ef4444';
-  if (r >= 0.75) return '#f97316';
-  if (r >= 0.55) return '#eab308';
-  return '#10b981';
-}
-function riskLabel(r) {
-  if (r >= 0.9) return 'critical';
-  if (r >= 0.75) return 'high';
-  if (r >= 0.55) return 'medium';
-  return 'low';
-}
+  // Alert Form State
+  const [subEmail, setSubEmail] = useState('');
+  const [subPhone, setSubPhone] = useState('');
+  const [subRegion, setSubRegion] = useState('');
+  const [subDemographic, setSubDemographic] = useState('ALL');
+  const [subLoading, setSubLoading] = useState(false);
+  const [subSuccess, setSubSuccess] = useState(false);
 
-// ─────────────────────────────────────────────────────────────────────────────
-export default function App() {
-  const [weather, setWeather]     = useState({});
-  const [loading, setLoading]     = useState(true);
-  const [alertSent, setAlertSent] = useState(false);
-  const [email, setEmail]         = useState('');
-  const [region, setRegion]       = useState('');
-  const [time, setTime]           = useState(new Date());
-
-  // Refresh clock every second
+  // Live Clock
   useEffect(() => {
-    const t = setInterval(() => setTime(new Date()), 1000);
-    return () => clearInterval(t);
+    const timer = setInterval(() => setTime(new Date()), 1000);
+    return () => clearInterval(timer);
   }, []);
 
-  // Fetch live weather once on load, then every 15 min
-  useEffect(() => {
-    async function load() {
-      setLoading(true);
-      const results = {};
-      await Promise.all(CITIES.map(async c => {
-        results[c.name] = await getWeather(c);
-      }));
-      setWeather(results);
+  // Fetch initial telemetry & WHO feeds
+  const loadInitialData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [riskData, feedsData] = await Promise.all([
+        api.getRiskSummary(),
+        api.getWhoAlerts().catch(() => ({ alerts: [] })),
+      ]);
+
+      setCities(riskData);
+      setWhoAlerts(feedsData.alerts || []);
+
+      if (riskData.length > 0) {
+        const initialCity = riskData[0];
+        setSelectedCity(initialCity);
+        // Load initial trajectory
+        const traj = await api.getForecastTrajectory(initialCity.city);
+        setForecastTrajectory(traj.trajectory || []);
+      }
+    } catch (err) {
+      addToast('Failed to connect to backend surveillance engine.', 'error');
+    } finally {
       setLoading(false);
     }
-    load();
-    const t = setInterval(load, 15 * 60 * 1000);
-    return () => clearInterval(t);
-  }, []);
+  }, [addToast]);
 
-  function handleAlert(e) {
+  useEffect(() => {
+    loadInitialData();
+  }, [loadInitialData]);
+
+  // Handle selecting city from card/map
+  const handleSelectCity = async (city) => {
+    setSelectedCity(city);
+    try {
+      const traj = await api.getForecastTrajectory(city.city);
+      setForecastTrajectory(traj.trajectory || []);
+    } catch {
+      // fallback
+    }
+  };
+
+  // Handle custom evaluation
+  const handleCustomEvaluation = (result) => {
+    setSelectedCity(result);
+    setForecastTrajectory(result.forecast_trajectory || []);
+  };
+
+  // Handle subscription form
+  const handleSubscribe = async (e) => {
     e.preventDefault();
-    if (!email || !region) return;
-    setAlertSent(true);
-  }
+    if (!subEmail || !subRegion) {
+      addToast('Please provide both email and region.', 'warning');
+      return;
+    }
+
+    setSubLoading(true);
+    try {
+      await api.subscribeAlerts({
+        email: subEmail,
+        phone: subPhone || null,
+        region: subRegion,
+        demographic_target: subDemographic,
+        min_risk_threshold: 0.70,
+      });
+      setSubSuccess(true);
+      addToast(`Subscribed ${subEmail} for early warnings in ${subRegion}.`, 'success');
+    } catch (err) {
+      addToast(err.message || 'Subscription failed.', 'error');
+    } finally {
+      setSubLoading(false);
+    }
+  };
 
   return (
     <>
-      {/* ── Navbar ── */}
+      {/* Navbar */}
       <nav className="navbar">
         <div className="navbar-inner">
-          <a href="#" className="nav-brand">🌿 ClimateGuard AI</a>
+          <a href="#" className="nav-brand">
+            🌿 ClimateGuard AI
+            <span style={{ fontSize: '0.72rem', color: 'var(--muted)', fontWeight: 400, marginLeft: '6px' }}>
+              (Seniors 55+ & Infants 0–4)
+            </span>
+          </a>
+
           <div className="nav-links">
-            <a href="#risk">Risk Map</a>
-            <a href="#vulnerable">Vulnerable</a>
-            <a href="#warnings">Warning Signs</a>
+            <a href="#telemetry">Live Telemetry</a>
+            <a href="#map">Risk Map</a>
+            <a href="#forecast">AI Forecast</a>
+            <a href="#vulnerable">Caregiver Guide</a>
             <a href="#alerts">Get Alerts</a>
           </div>
-          <div className="live-dot"><div className="dot" /> LIVE · {time.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' })}</div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div className="live-dot">
+              <div className="dot" />
+              LIVE · {time.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' })}
+            </div>
+            <button
+              className="btn btn-outline"
+              style={{ padding: '5px 12px', fontSize: '0.8rem' }}
+              onClick={() => setIsAdminPortalOpen(true)}
+            >
+              {isAuthenticated ? '🛡️ Officer Console' : 'Officer Login'}
+            </button>
+          </div>
         </div>
       </nav>
 
-      {/* ── Hero ── */}
+      {/* Hero Section */}
       <div className="hero">
         <div className="container">
-          <div className="hero-label">AI for Climate Change · Hackathon 2026</div>
-          <h1>Predicting Disease Outbreaks<br /><span>Before They Strike</span></h1>
-          <p>An AI early-warning system that monitors climate data to predict dengue and malaria outbreaks — protecting the elderly (55+) and young children (0–4 years) most at risk.</p>
-          <div className="disclaimer">⚠️ Decision-support tool only · Not a medical diagnostic system</div>
+          <div className="hero-label">AI for Climate Change · Hackathon 2026 · PCCOE Campus</div>
+          <h1>
+            Predicting Disease Outbreaks<br />
+            <span>Before They Strike</span>
+          </h1>
+          <p>
+            An AI-powered early-warning & decision-support system integrating real-time Open-Meteo climate data,
+            satellite telemetry, WHO alerts, and OpenStreetMap hospital networks — specifically safeguarding{' '}
+            <strong style={{ color: 'var(--orange)' }}>Seniors (55+)</strong> and{' '}
+            <strong style={{ color: 'var(--blue)' }}>Infants (0–4 years)</strong>.
+          </p>
+
+          {/* Vulnerable Groups Banner */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', maxWidth: '640px', margin: '1.5rem auto' }}>
+            <div className="card" style={{ padding: '1rem', borderTop: '3px solid var(--orange)', textAlign: 'center' }}>
+              <div style={{ fontSize: '2rem' }}>👴👵</div>
+              <div style={{ fontWeight: 800, color: 'var(--orange)', fontSize: '1.05rem', marginTop: '2px' }}>Seniors 55+</div>
+              <div style={{ fontSize: '0.78rem', color: 'var(--muted)', marginTop: '2px' }}>
+                3–5× higher mortality · Comorbidity risks
+              </div>
+            </div>
+            <div className="card" style={{ padding: '1rem', borderTop: '3px solid var(--blue)', textAlign: 'center' }}>
+              <div style={{ fontSize: '2rem' }}>👶🍼</div>
+              <div style={{ fontWeight: 800, color: 'var(--blue)', fontSize: '1.05rem', marginTop: '2px' }}>Infants 0–4 Yrs</div>
+              <div style={{ fontSize: '0.78rem', color: 'var(--muted)', marginTop: '2px' }}>
+                Immature immunity · Shock in 2–4 hours
+              </div>
+            </div>
+          </div>
+
+          <div className="disclaimer">
+            ⚠️ Decision-Support & Early-Warning Platform Only · NOT a Medical Diagnostic System
+          </div>
+
           <div className="hero-actions">
-            <a href="#risk" className="btn btn-primary">View Live Risk Map</a>
-            <a href="#vulnerable" className="btn btn-outline">Who Is Most at Risk?</a>
+            <a href="#map" className="btn btn-primary">🌍 Live Risk Map</a>
+            <button className="btn btn-danger" onClick={() => setIsReportModalOpen(true)}>
+              🚨 Report Vulnerable Case / Symptom
+            </button>
+            <a href="#alerts" className="btn btn-outline">🔔 Subscribe to Alerts</a>
           </div>
         </div>
       </div>
 
-      {/* ── Live Risk Dashboard ── */}
-      <section id="risk" className="section">
+      {/* ── Section 1: Live Climate Telemetry & Sentinel Cities ── */}
+      <section id="telemetry" className="section">
         <div className="container">
-          <h2 className="section-title">Live Disease Risk by City</h2>
+          <h2 className="section-title">Live Weather & Vector Outbreak Telemetry</h2>
           <p className="section-sub">
-            Risk scores are updated using real-time weather data from Open-Meteo.
-            Higher humidity and rainfall = higher mosquito breeding risk.
+            Real-time climate data from <strong>Open-Meteo API</strong> continuously evaluated against vector reproduction and viral incubation models.
           </p>
 
-          <div className="grid-auto" style={{ marginBottom: '2rem' }}>
-            {CITIES.map(city => {
-              const w = weather[city.name];
-              const risk = (() => {
-                let r = city.risk;
-                if (w?.humidity > 80) r = Math.min(0.99, r + 0.04);
-                if (w?.rain > 15) r = Math.min(0.99, r + 0.05);
-                return r;
-              })();
-              const label = riskLabel(risk);
-              return (
-                <div key={city.name} className="card city-card">
-                  <div>
-                    <div className="city-name">{city.name}</div>
-                    <div className="city-country">{city.country} · {city.disease}</div>
-                  </div>
-                  <div className="city-risk" style={{ color: riskColor(risk) }}>
-                    {(risk * 100).toFixed(0)}%
-                  </div>
-                  <span className={`risk risk-${label}`}>{label.toUpperCase()} RISK</span>
-                  {loading ? (
-                    <div className="city-weather"><div className="shimmer" style={{ width: '120px' }} /></div>
-                  ) : w ? (
-                    <div className="city-weather">
-                      <span>🌡 {w.temp}°C</span>
-                      <span>💧 {w.humidity}%</span>
-                      <span>🌧 {w.rain}mm</span>
-                    </div>
-                  ) : (
-                    <div className="city-weather" style={{ color: 'var(--muted)' }}>Weather unavailable</div>
-                  )}
+          {/* Custom Global Evaluator */}
+          <CustomLocationSearch onCustomEvaluation={handleCustomEvaluation} />
+
+          {/* Sentinel Cities Grid */}
+          <div className="grid-auto" style={{ marginBottom: '1.5rem' }}>
+            {loading ? (
+              [1, 2, 3, 4, 5, 6].map((n) => (
+                <div key={n} className="card city-card" style={{ height: '140px' }}>
+                  <div className="shimmer" style={{ width: '60%', height: '16px', marginBottom: '8px' }} />
+                  <div className="shimmer" style={{ width: '40%', height: '32px', marginBottom: '8px' }} />
+                  <div className="shimmer" style={{ width: '80%', height: '12px' }} />
                 </div>
-              );
-            })}
-          </div>
-
-          {/* Map */}
-          <div style={{ borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--border)' }}>
-            <MapContainer center={[10, 60]} zoom={2} style={{ height: '380px' }} zoomControl>
-              <TileLayer
-                url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-                attribution='&copy; OpenStreetMap &copy; CARTO'
-              />
-              {CITIES.map((city, i) => {
-                const risk = city.risk;
+              ))
+            ) : (
+              cities.map((city) => {
+                const isSelected = selectedCity?.city === city.city;
+                const riskPercent = (city.risk_score * 100).toFixed(0);
                 return (
-                  <CircleMarker
-                    key={i}
-                    center={[city.lat, city.lng]}
-                    radius={14 + risk * 14}
-                    fillColor={riskColor(risk)}
-                    fillOpacity={0.35}
-                    color={riskColor(risk)}
-                    weight={2}
+                  <div
+                    key={city.city}
+                    className="card city-card"
+                    style={{
+                      cursor: 'pointer',
+                      border: isSelected ? '2px solid var(--accent)' : '1px solid var(--border)',
+                      background: isSelected ? 'rgba(16,185,129,0.06)' : 'var(--surface)',
+                    }}
+                    onClick={() => handleSelectCity(city)}
                   >
-                    <Tooltip>
-                      <div style={{ fontSize: '0.82rem', background: 'transparent' }}>
-                        <strong>{city.name}</strong> · {city.disease}<br />
-                        Risk: {(risk * 100).toFixed(0)}% · {riskLabel(risk).toUpperCase()}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                      <div>
+                        <div className="city-name">{city.city}</div>
+                        <div className="city-country">{city.country} · {city.disease}</div>
                       </div>
-                    </Tooltip>
-                  </CircleMarker>
+                      <span className={`risk risk-${city.risk_level.toLowerCase()}`}>
+                        {city.risk_level}
+                      </span>
+                    </div>
+
+                    <div className="city-risk" style={{ color: city.risk_score >= 0.75 ? 'var(--orange)' : 'var(--accent)' }}>
+                      {riskPercent}%
+                    </div>
+
+                    {city.weather ? (
+                      <div className="city-weather">
+                        <span>🌡️ {city.weather.temperature}°C</span>
+                        <span>💧 {city.weather.humidity}%</span>
+                        <span>🌧️ {city.weather.precipitation}mm</span>
+                      </div>
+                    ) : (
+                      <div className="city-weather" style={{ color: 'var(--muted)' }}>Weather synced</div>
+                    )}
+                  </div>
                 );
-              })}
-            </MapContainer>
+              })
+            )}
           </div>
-          <p style={{ fontSize: '0.78rem', color: 'var(--muted)', marginTop: '0.5rem' }}>
-            Map source: OpenStreetMap + CartoDB · Hospital data: OSM Overpass API · Weather: Open-Meteo
-          </p>
         </div>
       </section>
 
-      {/* ── Vulnerable Groups ── */}
+      {/* ── Section 2: Interactive Leaflet Map & OSM Overpass Hospitals ── */}
+      <section id="map" className="section">
+        <div className="container">
+          <LiveRiskMap
+            cities={cities}
+            selectedCity={selectedCity}
+            onSelectCity={handleSelectCity}
+          />
+        </div>
+      </section>
+
+      {/* ── Section 3: AI Forecast & SHAP Explainability ── */}
+      <section id="forecast" className="section">
+        <div className="container">
+          <h2 className="section-title">AI Outbreak Forecasting & SHAP Explainability</h2>
+          <p className="section-sub">
+            Transparent machine learning models providing forward 30-day projection curves and exact feature attributions for{' '}
+            <strong style={{ color: 'var(--text)' }}>{selectedCity?.city || 'Selected Location'}</strong>.
+          </p>
+
+          <div className="grid-2">
+            <RiskForecastChart
+              trajectory={forecastTrajectory}
+              cityName={selectedCity?.city || 'Selected City'}
+            />
+            <ShapWaterfall
+              attributions={selectedCity?.shap_attributions || []}
+              cityName={selectedCity?.city || 'Selected City'}
+            />
+          </div>
+        </div>
+      </section>
+
+      {/* ── Section 4: Caregiver & Vulnerable Groups Action Guide ── */}
       <section id="vulnerable" className="section">
         <div className="container">
-          <h2 className="section-title">Who Is Most Vulnerable?</h2>
-          <p className="section-sub">Two groups face far higher risk of serious illness and death from dengue and malaria.</p>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.5rem' }}>
+            <div>
+              <h2 className="section-title">Caregiver Action Guide & Emergency Signs</h2>
+              <p className="section-sub" style={{ marginBottom: 0 }}>
+                Immediate clinical protocols for protecting elderly individuals and infants in outbreak zones.
+              </p>
+            </div>
+            <button className="btn btn-danger" onClick={() => setIsReportModalOpen(true)}>
+              🚨 Submit Emergency Symptom Report
+            </button>
+          </div>
 
-          <div className="grid-2">
-            {/* Elderly */}
+          <div className="grid-2" style={{ marginBottom: '1.5rem' }}>
+            {/* Elderly 55+ */}
             <div className="card" style={{ borderTop: '3px solid var(--orange)' }}>
-              <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>👴👵</div>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '0.25rem' }}>Seniors — Age 55 and above</h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--muted)', marginBottom: '1rem' }}>
-                Weakened immune systems and existing health conditions make dengue and malaria significantly more dangerous.
-              </p>
-              <ul style={{ fontSize: '0.85rem', color: 'var(--muted)', paddingLeft: '1.2rem', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                <li>3–5× higher risk of death compared to healthy adults</li>
-                <li>Blood-thinning medications increase bleeding risk during dengue</li>
-                <li>Symptoms are often confused with other chronic conditions — diagnosis is delayed</li>
-                <li>Fever above 40°C causes organ stress much faster in older patients</li>
-              </ul>
+              <div style={{ fontSize: '2.5rem', marginBottom: '0.5rem' }}>👴👵</div>
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '0.5rem', color: 'var(--orange)' }}>
+                Protocol: Seniors (55+ Years)
+              </h3>
+              <table style={{ fontSize: '0.82rem' }}>
+                <thead>
+                  <tr><th>Observed Sign</th><th>Immediate Action</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Fever &gt;38.5°C &gt;2 days</td>
+                    <td style={{ color: 'var(--orange)' }}>Visit clinic; <strong>avoid NSAIDs/Ibuprofen</strong></td>
+                  </tr>
+                  <tr>
+                    <td>Bleeding gums or red petechiae</td>
+                    <td style={{ color: 'var(--red)' }}><strong>Urgent hospital admission</strong> (Platelet drop)</td>
+                  </tr>
+                  <tr>
+                    <td>Severe abdominal pain + vomiting</td>
+                    <td style={{ color: 'var(--red)' }}>Hospitalize within 2 hours</td>
+                  </tr>
+                  <tr>
+                    <td>Confusion / Disorientation</td>
+                    <td style={{ color: 'var(--red)' }}>Call ambulance for cerebral malaria triage</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
 
-            {/* Infants */}
+            {/* Infants 0–4 */}
             <div className="card" style={{ borderTop: '3px solid var(--blue)' }}>
-              <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>👶🍼</div>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '0.25rem' }}>Infants & Young Children — Age 0 to 4</h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--muted)', marginBottom: '1rem' }}>
-                Young children have no prior immunity to dengue strains. Dehydration and shock can develop within hours.
-              </p>
-              <ul style={{ fontSize: '0.85rem', color: 'var(--muted)', paddingLeft: '1.2rem', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                <li>Dengue shock syndrome can develop in 2–4 hours in infants</li>
-                <li>Any fever in a baby under 3 months = go to emergency immediately</li>
-                <li>Newborns can get dengue from mother during birth</li>
-                <li>Pediatric ICU beds are often the first to run out during outbreaks</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Warning Signs ── */}
-      <section id="warnings" className="section">
-        <div className="container">
-          <h2 className="section-title">Warning Signs for Caregivers</h2>
-          <p className="section-sub">If you care for an elderly person or young child in a high-risk area, know these signs.</p>
-
-          <div className="grid-2">
-            <div>
-              <h3 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--orange)', marginBottom: '1rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>For Seniors (55+)</h3>
-              <table>
-                <thead><tr><th>Symptom</th><th>Action</th></tr></thead>
+              <div style={{ fontSize: '2.5rem', marginBottom: '0.5rem' }}>👶🍼</div>
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '0.5rem', color: 'var(--blue)' }}>
+                Protocol: Infants & Toddlers (0–4 Years)
+              </h3>
+              <table style={{ fontSize: '0.82rem' }}>
+                <thead>
+                  <tr><th>Observed Sign</th><th>Immediate Action</th></tr>
+                </thead>
                 <tbody>
-                  {[
-                    ['High fever for more than 2 days', 'Visit clinic — do not give ibuprofen'],
-                    ['Bleeding gums or red skin spots', 'Emergency — possible dengue hemorrhage'],
-                    ['Severe stomach pain + vomiting', 'Hospitalize within 2 hours'],
-                    ['Confusion with fever', 'Call ambulance — may be cerebral malaria'],
-                    ['Cold hands and feet despite fever', 'Life-threatening — call 108 / 911 now'],
-                  ].map(([s, a], i) => (
-                    <tr key={i}><td>{s}</td><td style={{ color: 'var(--orange)' }}>{a}</td></tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div>
-              <h3 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--blue)', marginBottom: '1rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>For Infants & Children (0–4)</h3>
-              <table>
-                <thead><tr><th>Symptom</th><th>Action</th></tr></thead>
-                <tbody>
-                  {[
-                    ['Any fever in baby under 3 months', 'Emergency immediately — no waiting'],
-                    ['Refusing to feed or crying non-stop', 'Dehydration risk — see pediatrician now'],
-                    ['Red dots or bruising on skin', 'Platelet drop — hospitalize urgently'],
-                    ['Fast breathing + pale skin', 'Dengue shock — call ambulance'],
-                    ['Hard to wake up, very limp', 'Emergency — neurological warning'],
-                  ].map(([s, a], i) => (
-                    <tr key={i}><td>{s}</td><td style={{ color: 'var(--blue)' }}>{a}</td></tr>
-                  ))}
+                  <tr>
+                    <td>Any fever in baby &lt;3 months</td>
+                    <td style={{ color: 'var(--red)' }}><strong>EMERGENCY</strong> — go to pediatric ER</td>
+                  </tr>
+                  <tr>
+                    <td>Refusal to feed / excessive crying</td>
+                    <td style={{ color: 'var(--orange)' }}>High dehydration risk; administer ORS & see doctor</td>
+                  </tr>
+                  <tr>
+                    <td>Rapid breathing + cold extremities</td>
+                    <td style={{ color: 'var(--red)' }}>Dengue Shock Syndrome — call ambulance</td>
+                  </tr>
+                  <tr>
+                    <td>Extreme lethargy, limp body</td>
+                    <td style={{ color: 'var(--red)' }}>Emergency hospitalization required</td>
+                  </tr>
                 </tbody>
               </table>
             </div>
           </div>
 
-          <div style={{ marginTop: '1.5rem', padding: '1rem 1.25rem', borderRadius: '8px', background: 'rgba(234,179,8,0.07)', border: '1px solid rgba(234,179,8,0.2)', fontSize: '0.85rem', color: 'var(--muted)' }}>
-            <strong style={{ color: 'var(--yellow)' }}>Prevention tip:</strong> Remove standing water near your home (pots, buckets, blocked drains). This is where dengue mosquitoes breed. During outbreak alerts, avoid outdoor activity at dawn and dusk — peak biting hours.
+          {/* Emergency Hotlines Directory */}
+          <div className="card" style={{ padding: '1rem 1.25rem', background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)' }}>
+            <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--red)', marginBottom: '6px' }}>
+              📞 National Emergency Medical Hotlines
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.5rem', fontSize: '0.8rem' }}>
+              <div>🇮🇳 <strong>India:</strong> 108 Ambulance / AIIMS Hotline</div>
+              <div>🇵🇭 <strong>Philippines:</strong> 911 / DOH 1555</div>
+              <div>🇧🇩 <strong>Bangladesh:</strong> 999 / DGHS 16752</div>
+              <div>🇳🇬 <strong>Nigeria:</strong> 112 / NCDC 0800-9700-0010</div>
+            </div>
           </div>
         </div>
       </section>
 
-      {/* ── WHO Alerts ── */}
+      {/* ── Section 5: Live WHO & Health Intelligence ── */}
       <section className="section">
         <div className="container">
-          <h2 className="section-title">Current WHO Disease Alerts</h2>
-          <p className="section-sub">Latest outbreak notices from the World Health Organization. Click any alert to read the full report.</p>
-          <div>
-            {WHO_ALERTS.map((a, i) => (
+          <h2 className="section-title">Live Global Health Intelligence</h2>
+          <p className="section-sub">Official Disease Outbreak News parsed live from World Health Organization feeds.</p>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {whoAlerts.map((a, i) => (
               <a key={i} href={a.link} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
-                <div
-                  className="alert-item"
-                  style={{ borderLeftColor: a.severity === 'critical' ? 'var(--red)' : a.severity === 'high' ? 'var(--orange)' : 'var(--yellow)' }}
-                >
+                <div className="alert-item" style={{ borderLeftColor: a.severity === 'CRITICAL' ? 'var(--red)' : 'var(--orange)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
                     <div>
                       <div className="alert-title">{a.title}</div>
-                      <div className="alert-meta">📍 {a.region} &nbsp;·&nbsp; 📅 {a.date} &nbsp;·&nbsp; WHO Disease Outbreak News</div>
+                      <div className="alert-meta">📍 {a.region} &nbsp;·&nbsp; 📅 {a.date} &nbsp;·&nbsp; {a.source || 'WHO DON'}</div>
                     </div>
-                    <span className={`risk risk-${a.severity}`}>{a.severity.toUpperCase()}</span>
+                    <span className={`risk risk-${a.severity.toLowerCase()}`}>{a.severity}</span>
                   </div>
                 </div>
               </a>
             ))}
           </div>
-          <p style={{ fontSize: '0.78rem', color: 'var(--muted)', marginTop: '0.75rem' }}>
-            Source: WHO Disease Outbreak News · who.int/emergencies/disease-outbreak-news
-          </p>
         </div>
       </section>
 
-      {/* ── How It Works ── */}
-      <section className="section">
-        <div className="container">
-          <h2 className="section-title">How the AI Works</h2>
-          <p className="section-sub">Three steps from climate data to early warning.</p>
-          <div className="steps">
-            {[
-              ['Collect Climate Data', 'The system reads live temperature, humidity, rainfall, and satellite data from Open-Meteo, NASA POWER, and Sentinel-2 every hour for 12 high-risk cities.'],
-              ['Run the AI Models', 'Three models — LSTM (patterns over time), XGBoost (feature importance), and Prophet (seasonal trends) — combine into an ensemble forecast with a 4-week lookahead window.'],
-              ['Issue Early Warnings', 'When risk crosses a threshold, governments, hospitals, and caregivers are notified by SMS and email — weeks before a potential outbreak — so preventive action can begin.'],
-            ].map(([title, desc], i) => (
-              <div key={i} className="step">
-                <div className="step-num">{i + 1}</div>
-                <div>
-                  <div className="step-title">{title}</div>
-                  <div className="step-desc">{desc}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ── Get Alerts ── */}
+      {/* ── Section 6: Real Alert Subscription ── */}
       <section id="alerts" className="section">
-        <div className="container" style={{ maxWidth: '640px' }}>
-          <h2 className="section-title">Get Early Warning Alerts</h2>
-          <p className="section-sub">Register to receive an email when AI detects rising outbreak risk in your region — especially useful for caregivers, pediatricians, and geriatric care staff.</p>
+        <div className="container" style={{ maxWidth: '680px' }}>
+          <h2 className="section-title">Subscribe to Early Warning Alerts</h2>
+          <p className="section-sub">
+            Receive automated SMS and email advisories when AI models detect escalating vector risk in your region.
+          </p>
 
-          {alertSent ? (
-            <div style={{ padding: '1.5rem', borderRadius: '10px', background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.25)', textAlign: 'center' }}>
-              <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>✅</div>
-              <div style={{ fontWeight: 700, marginBottom: '4px' }}>You're subscribed</div>
-              <div style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>You'll receive alerts for <strong style={{ color: 'var(--text)' }}>{region}</strong> when outbreak risk rises.</div>
+          {subSuccess ? (
+            <div className="card" style={{ padding: '1.5rem', textAlign: 'center', background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.3)' }}>
+              <div style={{ fontSize: '2.5rem', marginBottom: '4px' }}>✅</div>
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 700 }}>Alert Subscription Active</h3>
+              <p style={{ fontSize: '0.85rem', color: 'var(--muted)', marginTop: '4px' }}>
+                Early warnings for <strong style={{ color: 'var(--text)' }}>{subRegion}</strong> will be sent to{' '}
+                <strong style={{ color: 'var(--text)' }}>{subEmail}</strong>.
+              </p>
+              <button className="btn btn-outline" style={{ marginTop: '1rem' }} onClick={() => setSubSuccess(false)}>
+                Register Another Location
+              </button>
             </div>
           ) : (
-            <form onSubmit={handleAlert} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-              <div className="form-row">
-                <input
-                  type="email" placeholder="Your email address"
-                  value={email} onChange={e => setEmail(e.target.value)} required
-                />
-                <select value={region} onChange={e => setRegion(e.target.value)} required>
-                  <option value="">Select your region</option>
-                  {CITIES.map(c => <option key={c.name} value={c.name}>{c.name}, {c.country}</option>)}
-                  <option value="Global">Global (All alerts)</option>
-                </select>
+            <form onSubmit={handleSubscribe} className="card" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              <div className="form-group-row">
+                <div className="form-field">
+                  <label>Email Address *</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="e.g. caregiver@example.com"
+                    value={subEmail}
+                    onChange={(e) => setSubEmail(e.target.value)}
+                  />
+                </div>
+                <div className="form-field">
+                  <label>Phone Number (SMS Alerts)</label>
+                  <input
+                    type="tel"
+                    placeholder="e.g. +91-9876543210"
+                    value={subPhone}
+                    onChange={(e) => setSubPhone(e.target.value)}
+                  />
+                </div>
               </div>
-              <button type="submit" className="btn btn-primary" style={{ alignSelf: 'flex-start' }}>
-                Subscribe to Alerts
+
+              <div className="form-group-row">
+                <div className="form-field">
+                  <label>Monitored City / Region *</label>
+                  <select value={subRegion} onChange={(e) => setSubRegion(e.target.value)} required>
+                    <option value="">Select city or region</option>
+                    {cities.map((c) => (
+                      <option key={c.city} value={c.city}>{c.city}, {c.country}</option>
+                    ))}
+                    <option value="Global">Global (All Alerts)</option>
+                  </select>
+                </div>
+
+                <div className="form-field">
+                  <label>Demographic Focus</label>
+                  <select value={subDemographic} onChange={(e) => setSubDemographic(e.target.value)}>
+                    <option value="ALL">All Populations</option>
+                    <option value="SENIORS_55_PLUS">👴 Seniors 55+ Specialized Alerts</option>
+                    <option value="INFANTS_0_4">👶 Infants 0–4 Specialized Alerts</option>
+                  </select>
+                </div>
+              </div>
+
+              <button type="submit" className="btn btn-primary" style={{ alignSelf: 'flex-start' }} disabled={subLoading}>
+                {subLoading ? 'Registering...' : '🔔 Register for Early Warnings'}
               </button>
-              <p style={{ fontSize: '0.78rem', color: 'var(--muted)' }}>
-                Alerts are for public health awareness only. This is not a medical service.
-              </p>
+
+              <div style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>
+                Zero spam. Only critical outbreak alerts sent. You can unsubscribe anytime.
+              </div>
             </form>
           )}
         </div>
       </section>
 
-      {/* ── Footer ── */}
+      {/* Footer */}
       <footer className="section">
         <div className="container">
           <hr className="divider" />
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1.5rem', marginBottom: '1.5rem' }}>
             <div>
               <div style={{ fontWeight: 700, marginBottom: '4px' }}>🌿 ClimateGuard AI</div>
-              <div style={{ fontSize: '0.82rem', color: 'var(--muted)' }}>AI for Climate Change · Hackathon 2026 · PCCOE Campus</div>
+              <div style={{ fontSize: '0.82rem', color: 'var(--muted)' }}>
+                Production Early Warning System · AI for Climate Change · Hackathon 2026 @ PCCOE Campus
+              </div>
             </div>
             <div style={{ fontSize: '0.82rem', color: 'var(--muted)', textAlign: 'right' }}>
-              <div>Data: Open-Meteo · WHO · OSM · ReliefWeb</div>
-              <div>Models: LSTM · XGBoost · Prophet · SHAP</div>
+              <div>Live APIs: Open-Meteo · OSM Overpass · WHO RSS · ReliefWeb</div>
+              <div>Intelligence: LSTM · XGBoost · Prophet · SHAP XAI</div>
             </div>
           </div>
           <p className="footer-note">
-            <strong>Disclaimer:</strong> ClimateGuard AI is a public health decision-support tool. It is not a medical diagnostic system and must not be used to diagnose or treat any individual. All predictions are probabilistic estimates based on climate and historical data. Always consult a qualified medical professional for health decisions.
+            <strong>Disclaimer:</strong> ClimateGuard AI is a decision-support early-warning platform for municipal health departments, pediatricians, and caregivers. It is <strong>NOT a clinical diagnostic tool</strong> and must not be used to diagnose or treat individual patients. All forecasts are probabilistic estimates based on climate telemetry.
           </p>
         </div>
       </footer>
+
+      {/* Modals */}
+      <ReportSymptomModal
+        isOpen={isReportModalOpen}
+        onClose={() => setIsReportModalOpen(false)}
+      />
+
+      <AdminPortal
+        isOpen={isAdminPortalOpen}
+        onClose={() => setIsAdminPortalOpen(false)}
+      />
     </>
+  );
+}
+
+export default function App() {
+  return (
+    <ToastProvider>
+      <AuthProvider>
+        <MainApp />
+      </AuthProvider>
+    </ToastProvider>
   );
 }
